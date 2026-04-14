@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: legal-intel-python
+    env: python
+    region: singapore
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_ENV
+        value: production
