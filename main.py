@@ -1,7 +1,10 @@
+import atexit
 import re
 import os
 import io
 import logging
+import uuid
+from contextlib import asynccontextmanager
 
 import fitz  # PyMuPDF — primary extractor: layout-aware, low memory, fast
 import pdfplumber  # fallback: used when fitz fails to open a document
@@ -9,6 +12,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from posthog import Posthog
 from pydantic import BaseModel
 
 load_dotenv()
@@ -16,10 +20,43 @@ load_dotenv()
 logger = logging.getLogger("pdf_service")
 
 # ---------------------------------------------------------------------------
+# PostHog setup
+# ---------------------------------------------------------------------------
+
+posthog_client: Posthog | None = None
+
+
+def _ph_capture(event: str, properties: dict) -> None:
+    """Fire-and-forget PostHog capture. No-ops if client is not initialised."""
+    if posthog_client is not None:
+        posthog_client.capture(
+            distinct_id=str(uuid.uuid4()),
+            event=event,
+            properties=properties,
+        )
+
+
+# ---------------------------------------------------------------------------
 # App setup
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="Legal Intel PDF Service", version="0.2.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global posthog_client
+    token = os.environ.get("POSTHOG_PROJECT_TOKEN", "")
+    host = os.environ.get("POSTHOG_HOST")
+    if token:
+        kwargs: dict = {"api_key": token, "enable_exception_autocapture": True}
+        if host:
+            kwargs["host"] = host
+        posthog_client = Posthog(**kwargs)
+        atexit.register(posthog_client.shutdown)
+    yield
+    if posthog_client is not None:
+        posthog_client.flush()
+
+
+app = FastAPI(title="Legal Intel PDF Service", version="0.2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -192,6 +229,7 @@ def _extract_from_bytes(contents: bytes) -> ExtractResponse:
         logger.warning(
             "PyMuPDF extraction failed (%s) — falling back to pdfplumber", exc
         )
+        _ph_capture("pdf_fallback_extractor_used", {"reason": str(exc)[:200]})
         return _extract_with_pdfplumber(contents)
 
 
@@ -208,14 +246,27 @@ async def health():
 async def extract_pdf(file: UploadFile = File(...)):
     """Accept a multipart PDF upload and extract its text."""
     if file.content_type not in ("application/pdf", "application/octet-stream"):
+        _ph_capture("pdf_upload_failed", {"reason": "invalid_content_type"})
         raise HTTPException(
             status_code=400,
             detail=f"Expected a PDF file, got: {file.content_type}",
         )
     contents = await file.read()
     if not contents:
+        _ph_capture("pdf_upload_failed", {"reason": "empty_file"})
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-    return _extract_from_bytes(contents)
+    try:
+        result = _extract_from_bytes(contents)
+    except HTTPException as exc:
+        _ph_capture("pdf_upload_failed", {"reason": "parse_error", "status_code": exc.status_code})
+        raise
+    _ph_capture("pdf_extracted", {
+        "page_count": result.page_count,
+        "char_count": result.char_count,
+        "is_scanned": result.is_scanned,
+        "file_size_bytes": len(contents),
+    })
+    return result
 
 
 @app.post("/extract-from-url", response_model=ExtractResponse)
@@ -231,20 +282,37 @@ async def extract_pdf_from_url(req: ExtractFromUrlRequest):
             response.raise_for_status()
             contents = response.content
     except httpx.HTTPStatusError as exc:
+        _ph_capture("pdf_url_extraction_failed", {
+            "reason": "upstream_http_error",
+            "upstream_status_code": exc.response.status_code,
+        })
         raise HTTPException(
             status_code=400,
             detail=f"Failed to download PDF — upstream returned {exc.response.status_code}",
         )
     except httpx.RequestError as exc:
+        _ph_capture("pdf_url_extraction_failed", {"reason": "request_error"})
         raise HTTPException(
             status_code=400,
             detail=f"Failed to download PDF from URL: {exc}",
         )
 
     if not contents:
+        _ph_capture("pdf_url_extraction_failed", {"reason": "empty_download"})
         raise HTTPException(status_code=400, detail="Downloaded file is empty.")
 
-    return _extract_from_bytes(contents)
+    try:
+        result = _extract_from_bytes(contents)
+    except HTTPException as exc:
+        _ph_capture("pdf_url_extraction_failed", {"reason": "parse_error", "status_code": exc.status_code})
+        raise
+    _ph_capture("pdf_url_extracted", {
+        "page_count": result.page_count,
+        "char_count": result.char_count,
+        "is_scanned": result.is_scanned,
+        "file_size_bytes": len(contents),
+    })
+    return result
 
 
 if __name__ == "__main__":
