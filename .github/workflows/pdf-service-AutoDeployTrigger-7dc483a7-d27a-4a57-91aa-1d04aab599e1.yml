@@ -1,0 +1,49 @@
+name: Trigger auto deployment for pdf-service
+
+# When this action will be executed
+on:
+  # Automatically trigger it when detected changes in repo
+  push:
+    branches: 
+      [ main ]
+    paths:
+    - '**'
+    - '.github/workflows/pdf-service-AutoDeployTrigger-7dc483a7-d27a-4a57-91aa-1d04aab599e1.yml'
+
+  # Allow manual trigger 
+  workflow_dispatch:      
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions: 
+      id-token: write #This is required for requesting the OIDC JWT Token
+      contents: read #Required when GH token is used to authenticate with private repo
+
+    steps:
+      - name: Checkout to the branch
+        uses: actions/checkout@v2
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.PDFSERVICE_AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.PDFSERVICE_AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.PDFSERVICE_AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build and push container image to registry
+        uses: azure/container-apps-deploy-action@v2
+        with:
+          appSourcePath: ${{ github.workspace }}
+          _dockerfilePathKey_: _dockerfilePath_
+          _targetLabelKey_: _targetLabel_
+          registryUrl: legalintelacr.azurecr.io
+          registryUsername: ${{ secrets.PDFSERVICE_REGISTRY_USERNAME }}
+          registryPassword: ${{ secrets.PDFSERVICE_REGISTRY_PASSWORD }}
+          containerAppName: pdf-service
+          resourceGroup: legal-intel-rg
+          imageToBuild: legalintelacr.azurecr.io/pdf-service:${{ github.sha }}
+          _buildArgumentsKey_: |
+            _buildArgumentsValues_
+
+
