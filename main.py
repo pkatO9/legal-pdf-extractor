@@ -46,7 +46,7 @@ async def lifespan(app: FastAPI):
     token = os.environ.get("POSTHOG_PROJECT_TOKEN", "")
     host = os.environ.get("POSTHOG_HOST")
     if token:
-        kwargs: dict = {"api_key": token, "enable_exception_autocapture": True}
+        kwargs: dict = {"project_api_key": token, "enable_exception_autocapture": True}
         if host:
             kwargs["host"] = host
         posthog_client = Posthog(**kwargs)
