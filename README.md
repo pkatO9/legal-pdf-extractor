@@ -71,9 +71,105 @@ curl -X POST http://localhost:8000/extract-from-url \
   -d '{"url": "https://example.com/judgment.pdf"}' | jq .
 ```
 
-## Deploying to Render
+## Deploying to Azure
 
-A `render.yaml` is included. Connect this repo to Render and it will deploy automatically on every push.
+Deployments are automated via GitHub Actions — every push to `main` builds a new image and updates the Container App. Secrets must be configured in the GitHub repo settings (see below).
+
+### First-time setup
+
+Set these shell variables before running any `az` commands:
+
+```bash
+RESOURCE_GROUP="legal-intel-rg"
+LOCATION="eastus"
+ACR_NAME="legalintelacr"
+ENVIRONMENT="legal-intel-env"
+APP_NAME="pdf-service"
+```
+
+```bash
+# 1. Create resource group
+az group create --name $RESOURCE_GROUP --location $LOCATION
+
+# 2. Create Azure Container Registry
+az acr create --resource-group $RESOURCE_GROUP \
+  --name $ACR_NAME --sku Basic --admin-enabled true
+
+# 3. Create Container Apps environment
+az containerapp env create \
+  --name $ENVIRONMENT \
+  --resource-group $RESOURCE_GROUP \
+  --location $LOCATION
+
+# 4. Build and push the initial image
+az acr build --registry $ACR_NAME --image pdf-service:latest .
+
+# 5. Deploy the Container App
+ACR_PASSWORD=$(az acr credential show --name $ACR_NAME --query "passwords[0].value" -o tsv)
+
+az containerapp create \
+  --name $APP_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --environment $ENVIRONMENT \
+  --image $ACR_NAME.azurecr.io/pdf-service:latest \
+  --registry-server $ACR_NAME.azurecr.io \
+  --registry-username $ACR_NAME \
+  --registry-password $ACR_PASSWORD \
+  --target-port 8000 \
+  --ingress external \
+  --min-replicas 0 \
+  --max-replicas 5 \
+  --cpu 1.0 --memory 2.0Gi
+
+# 6. Get the public URL
+az containerapp show \
+  --name $APP_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --query properties.configuration.ingress.fqdn -o tsv
+```
+
+### GitHub Actions secrets required
+
+Add these in **GitHub → repo → Settings → Secrets and variables → Actions**:
+
+| Secret | Value |
+|---|---|
+| `AZURE_CREDENTIALS` | JSON output from `az ad sp create-for-rbac` (see below) |
+| `ACR_NAME` | e.g. `legalintelacr` |
+| `CONTAINER_APP_NAME` | e.g. `pdf-service` |
+| `RESOURCE_GROUP` | e.g. `legal-intel-rg` |
+
+Generate `AZURE_CREDENTIALS`:
+
+```bash
+az ad sp create-for-rbac \
+  --name "github-actions-legal-intel" \
+  --role contributor \
+  --scopes /subscriptions/$(az account show --query id -o tsv)/resourceGroups/$RESOURCE_GROUP \
+  --sdk-auth
+```
+
+### Manual redeploy (if needed)
+
+```bash
+# Rebuild and push image
+az acr build --registry $ACR_NAME --image pdf-service:latest .
+
+# Update the running Container App
+az containerapp update \
+  --name $APP_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --image $ACR_NAME.azurecr.io/pdf-service:latest
+```
+
+### Upgrade compute specs
+
+```bash
+az containerapp update \
+  --name $APP_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --cpu 2.0 --memory 4.0Gi
+```
 
 ## License
 
